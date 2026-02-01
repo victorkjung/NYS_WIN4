@@ -5,7 +5,7 @@ Includes:
 - Patterns explorer (pairs/repeats/mirrors/palindromes)
 - Hot list CSV export
 - Watchlist (favorites): add/remove + export + optional import CSV
-- Mock Checker: 4-digit inputs -> Straight + Box matching + Box Type (24-way/12-way/6-way/4-way/1-way)
+- Mock Checker: 4-digit inputs -> Straight + Box matching + Box Type
 """
 
 from __future__ import annotations
@@ -39,9 +39,6 @@ from win4lib.analytics import (
     box_type_for_number,
 )
 
-# ---------------------------
-# Page config
-# ---------------------------
 st.set_page_config(
     page_title="NYS Win 4 Lottery Analytics",
     page_icon="🎰",
@@ -49,9 +46,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ---------------------------
-# Minimal CSS for mobile friendliness
-# ---------------------------
 st.markdown(
     """
 <style>
@@ -66,9 +60,6 @@ h1, h2, h3 { letter-spacing: -0.02em; }
     unsafe_allow_html=True,
 )
 
-# ---------------------------
-# Constants
-# ---------------------------
 DATASET_DOMAIN = "data.ny.gov"
 DATASET_ID = "hsys-3def"
 DRAW_TYPES = ["Midday", "Evening"]
@@ -148,10 +139,29 @@ def _heatmap_digit_position(freq: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
+def _tidy_pair_matrix(df_pairs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Defensive: ensures we always get a 2-col df: pair,count
+    even if upstream changes.
+    """
+    if df_pairs is None or df_pairs.empty:
+        return pd.DataFrame({"pair": [], "count": []})
+
+    tmp = df_pairs.reset_index()
+
+    cols = list(tmp.columns)
+    if len(cols) < 2:
+        return pd.DataFrame({"pair": [], "count": []})
+
+    # Rename first two columns to pair/count and select only those
+    tmp = tmp.rename(columns={cols[0]: "pair", cols[1]: "count"})
+    tmp = tmp[["pair", "count"]]
+    return tmp
+
+
 def main() -> None:
     st.title("🎰 NYS Win 4 Lottery Analytics")
 
-    # Freshness badge from Socrata metadata API
     data_updated, rows_updated, _label = get_freshness_info(DATASET_DOMAIN, DATASET_ID)
     st.markdown(format_freshness_badge(data_updated, rows_updated), unsafe_allow_html=True)
 
@@ -165,21 +175,15 @@ def main() -> None:
     df = _apply_filters(df_long, filters)
     df = add_digit_columns(df)
     df = add_pattern_features(df)
-    df = add_sorted_signature(df)  # needed for Box matching
+    df = add_sorted_signature(df)
 
-    # Watchlist state
     if "watchlist" not in st.session_state:
         st.session_state["watchlist"] = []
 
     _kpi_row(df)
 
-    tabs = st.tabs(
-        ["📌 Overview", "🔥 Frequency", "🧩 Patterns", "📈 Trends", "⭐ Watchlist", "✅ Mock Checker", "🧾 Data"]
-    )
+    tabs = st.tabs(["📌 Overview", "🔥 Frequency", "🧩 Patterns", "📈 Trends", "⭐ Watchlist", "✅ Mock Checker", "🧾 Data"])
 
-    # ---------------------------
-    # Overview
-    # ---------------------------
     with tabs[0]:
         st.subheader("Overview")
         if df.empty:
@@ -191,9 +195,6 @@ def main() -> None:
             fig.update_layout(height=380)
             st.plotly_chart(fig, use_container_width=True)
 
-    # ---------------------------
-    # Frequency
-    # ---------------------------
     with tabs[1]:
         st.subheader("Frequency Analysis")
 
@@ -213,7 +214,6 @@ def main() -> None:
                 st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
-
         st.markdown("#### Hot list (exportable)")
         hot_n = st.slider("Hot list size", 10, 500, 50, step=10)
         hot_df = hot_cold_scores(df, window_days=rolling_days).head(hot_n)
@@ -228,7 +228,6 @@ def main() -> None:
         )
 
         st.divider()
-
         st.markdown("#### Top / Bottom combos")
         top_n = st.slider("Show top/bottom N combos", 10, 200, 50, step=10)
         freq_combo = combo_frequency(df)
@@ -241,9 +240,7 @@ def main() -> None:
             st.markdown("**Least frequent**")
             st.dataframe(freq_combo.tail(top_n), use_container_width=True, hide_index=True)
 
-    # ---------------------------
-    # Patterns
-    # ---------------------------
+    # ✅ CRASH FIX IS HERE
     with tabs[2]:
         st.subheader("Pattern Explorer: Pairs / Repeats / Mirrors")
 
@@ -273,14 +270,16 @@ def main() -> None:
                 st.dataframe(mirror, use_container_width=True, hide_index=True)
 
             with c2:
-                pm = pair_position_matrix(df).reset_index()
-                pm.columns = ["pair", "count"]
+                # pair_position_matrix now returns tidy shape,
+                # but we still defend in case of future edits.
+                pm_raw = pair_position_matrix(df)
+                pm = _tidy_pair_matrix(pm_raw)
+
                 fig2 = px.bar(pm, x="pair", y="count", title="Where repeats occur (position pairs)")
                 fig2.update_layout(height=420, xaxis_title="Position Pair", yaxis_title="Count")
                 st.plotly_chart(fig2, use_container_width=True)
 
             st.divider()
-
             st.markdown("#### Filter by pattern and inspect combos")
             pat = st.selectbox("Pattern", options=sorted(df["pattern_label"].unique().tolist()))
             dpat = df[df["pattern_label"] == pat]
@@ -288,9 +287,6 @@ def main() -> None:
             pat_freq.columns = ["win4", "count"]
             st.dataframe(pat_freq, use_container_width=True, hide_index=True)
 
-    # ---------------------------
-    # Trends
-    # ---------------------------
     with tabs[3]:
         st.subheader("Trends: Hot vs Cold + Performance")
 
@@ -314,9 +310,6 @@ def main() -> None:
             fig.update_layout(height=420, yaxis_tickformat=".2%")
             st.plotly_chart(fig, use_container_width=True)
 
-    # ---------------------------
-    # Watchlist
-    # ---------------------------
     with tabs[4]:
         st.subheader("⭐ Watchlist (favorite combos)")
 
@@ -351,7 +344,6 @@ def main() -> None:
                 st.session_state["watchlist"] = [w for w in st.session_state["watchlist"] if w not in set(remove_pick)]
 
         st.divider()
-
         wl = sorted(st.session_state["watchlist"])
         st.caption(f"Watchlist size: {len(wl)}")
 
@@ -387,14 +379,9 @@ def main() -> None:
             except Exception as e:
                 st.error(f"Import failed: {e}")
 
-    # ---------------------------
-    # Mock Checker
-    # ---------------------------
     with tabs[5]:
         st.subheader("Mock Drawing Checker (Straight + Box + Box Type)")
-        st.caption(
-            "Straight = exact order. Box = same digits any order (repeats count). Box Type shows how many distinct permutations exist."
-        )
+        st.caption("Straight = exact order. Box = same digits any order (repeats count). Box Type = distinct permutations.")
 
         dcol1, dcol2, dcol3, dcol4 = st.columns(4)
         with dcol1:
@@ -413,10 +400,7 @@ def main() -> None:
         with scope_col1:
             draw_scope = st.selectbox("Check which draws?", options=["Both (Midday + Evening)", "Midday only", "Evening only"])
         with scope_col2:
-            st.markdown(
-                f"**Your Box Type:** {box_label}  \n"
-                f"**Sorted signature:** `{user_box_sig}`"
-            )
+            st.markdown(f"**Your Box Type:** {box_label} ({box_ways} ways)  \n**Sorted signature:** `{user_box_sig}`")
 
         if df.empty:
             st.info("No data for the selected filters.")
@@ -428,8 +412,6 @@ def main() -> None:
                 dff = dff[dff["draw_type"] == "Evening"]
 
             straight_matches = dff[dff["win4"] == user_straight].sort_values("draw_date", ascending=False)
-
-            # Box matches: same multiset of digits (signature equality)
             box_matches_all = dff[dff["sig_sorted"] == user_box_sig].sort_values("draw_date", ascending=False)
             box_only_matches = box_matches_all[box_matches_all["win4"] != user_straight]
 
@@ -484,22 +466,6 @@ def main() -> None:
                 st.markdown("### Breakdown by draw")
                 st.dataframe(breakdown, use_container_width=True, hide_index=True)
 
-                st.markdown("### Box Type Guide")
-                guide = pd.DataFrame(
-                    [
-                        ("24-way", "All digits different (ABCD)", "24"),
-                        ("12-way", "One pair (AABC)", "12"),
-                        ("6-way",  "Two pairs (AABB)", "6"),
-                        ("4-way",  "Triple (AAAB)", "4"),
-                        ("1-way",  "All same (AAAA)", "1"),
-                    ],
-                    columns=["Box Type", "Digit Pattern", "Distinct Permutations"],
-                )
-                st.dataframe(guide, use_container_width=True, hide_index=True)
-
-    # ---------------------------
-    # Data
-    # ---------------------------
     with tabs[6]:
         st.subheader("Underlying Data")
         st.caption("Normalized long-format: one row per draw (Midday/Evening).")
