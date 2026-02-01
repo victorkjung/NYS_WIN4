@@ -1,5 +1,11 @@
 # NYS Win 4 Lottery Analytics (Streamlit)
 
+Win 4 Analyzer for Entertainment Purposes
+
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![Streamlit](https://img.shields.io/badge/streamlit-app-red.svg)
+
 A production-ready analytics dashboard for **New York State Win 4** results using the official NY Open Data Socrata dataset.
 
 - **Dataset**: Lottery Daily Numbers (Win 4) Winning Numbers  
