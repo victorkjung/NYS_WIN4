@@ -112,22 +112,26 @@ export SOCRATA_APP_TOKEN="YOUR_TOKEN"
 Docker
 ```docker build -t nys-win4 .
 docker run -p 8501:8501 -e SOCRATA_APP_TOKEN="$SOCRATA_APP_TOKEN" nys-win4
-```
+
 Open:
 http://localhost:8501
-```
 
 ```
 Repo Structure
 ```
-Win4Lottery.py — Streamlit entrypoint
-win4lib/
-socrata_client.py — chunked Socrata fetch + retries
-data.py — load + normalize + freshness badge helpers
-analytics.py — digit analytics + patterns + hot/cold + watchlist + box tools
-.streamlit/config.toml — theme/server config
-requirements.txt — pinned dependencies
-Dockerfile — container deployment
+.
+├── Win4Lottery.py
+├── requirements.txt
+├── Dockerfile
+├── README.md
+├── .streamlit/
+│   └── config.toml
+└── win4lib/
+    ├── __init__.py
+    ├── socrata_client.py
+    ├── data.py
+    └── analytics.py
+
 ```
 
 Notes / Performance Tips
@@ -142,4 +146,3 @@ Disclaimer
 Lottery drawings are random. This project is for education and analytics only.
 ::contentReference[oaicite:0]{index=0}
 ```
-
