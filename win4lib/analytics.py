@@ -185,15 +185,22 @@ def pattern_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 def pair_position_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Counts equality between position pairs: 1-2,1-3,1-4,2-3,2-4,3-4
-    Returns index=pair, col=count
+    ✅ FIXED: Always returns a tidy dataframe with:
+      index = pair label (e.g., "1-2")
+      column = "count"
+    This prevents shape surprises and fixes the Streamlit crash.
     """
     idx = ["1-2", "1-3", "1-4", "2-3", "2-4", "3-4"]
     if df.empty:
-        return pd.DataFrame({"count": [0] * 6}, index=idx)
+        return pd.DataFrame({"count": [0] * len(idx)}, index=idx)
+
+    # Ensure digits exist
+    if not all(c in df.columns for c in ["d1", "d2", "d3", "d4"]):
+        return pd.DataFrame({"count": [0] * len(idx)}, index=idx)
 
     d = df[["d1", "d2", "d3", "d4"]]
-    counts = {
+
+    pairs = {
         "1-2": int((d["d1"] == d["d2"]).sum()),
         "1-3": int((d["d1"] == d["d3"]).sum()),
         "1-4": int((d["d1"] == d["d4"]).sum()),
@@ -201,9 +208,8 @@ def pair_position_matrix(df: pd.DataFrame) -> pd.DataFrame:
         "2-4": int((d["d2"] == d["d4"]).sum()),
         "3-4": int((d["d3"] == d["d4"]).sum()),
     }
-    out = pd.DataFrame({"count": counts}).T
-    out.index.name = "pair"
-    return out
+
+    return pd.Series(pairs, name="count").reindex(idx).to_frame()
 
 
 # ---------------------------
@@ -214,7 +220,6 @@ def add_sorted_signature(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds `sig_sorted` for Box matching (multiset equality).
     Uses digit columns if present for speed; otherwise falls back to string sorting.
-    Example: win4=0427 -> sig_sorted=0247 ; win4=1123 -> 1123
     """
     out = df.copy()
     if df.empty:
@@ -233,23 +238,20 @@ def add_sorted_signature(df: pd.DataFrame) -> pd.DataFrame:
 
 def box_type_for_number(win4: str) -> Tuple[str, int, str]:
     """
-    Given a 4-digit string, returns:
-      (box_label, distinct_permutations, sorted_signature)
+    Returns: (box_label, distinct_permutations, sorted_signature)
 
-    Rules:
-      - 24-way: ABCD (all unique)
-      - 12-way: AABC (one pair)
-      - 6-way : AABB (two pairs)
-      - 4-way : AAAB (triple)
-      - 1-way : AAAA (quad)
+    24-way: ABCD
+    12-way: AABC
+    6-way : AABB
+    4-way : AAAB
+    1-way : AAAA
     """
     s = str(win4).strip()
     if not (s.isdigit() and len(s) == 4):
-        # best-effort normalize
         s = "".join(ch for ch in s if ch.isdigit()).zfill(4)[:4]
 
     sig = "".join(sorted(s))
-    counts = Counter(sig)  # counts of each digit, already sorted but order irrelevant
+    counts = Counter(sig)
 
     denom = 1
     for c in counts.values():
@@ -268,7 +270,6 @@ def box_type_for_number(win4: str) -> Tuple[str, int, str]:
     elif ways == 1:
         label = "1-way"
     else:
-        # Should not happen for 4 digits, but keep safe
         label = f"{ways}-way"
 
     return label, int(ways), sig
@@ -279,12 +280,6 @@ def box_type_for_number(win4: str) -> Tuple[str, int, str]:
 # ---------------------------
 
 def watchlist_stats(df: pd.DataFrame, watchlist: list[str], window_days: int = 60) -> pd.DataFrame:
-    """
-    For each watchlist combo:
-      - overall_count
-      - recent_count (within last window_days based on df max date)
-      - recent_share (recent_count / recent_rows)
-    """
     if df.empty or not watchlist:
         return pd.DataFrame(columns=["win4", "overall_count", "recent_count", "recent_share"])
 
