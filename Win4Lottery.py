@@ -1,484 +1,872 @@
 """
-NYS Win 4 Lottery Analytics (Streamlit) — production-ready
-Includes:
-- Socrata freshness badge via dataset metadata API
-- Patterns explorer (pairs/repeats/mirrors/palindromes)
-- Hot list CSV export
-- Watchlist (favorites): add/remove + export + optional import CSV
-- Mock Checker: 4-digit inputs -> Straight + Box matching + Box Type
+NYS Win 4 Lottery Analytics - Streamlit Dashboard
+A comprehensive analytics tool for Win 4 lottery results.
+
+For entertainment purposes only.
 """
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import List, Tuple
-
+import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
+from datetime import datetime, timedelta
 
-from win4lib.data import (
-    load_win4_long,
-    get_last_updated_hint,
-    get_freshness_info,
-    format_freshness_badge,
+# Import win4lib modules
+from win4lib import (
+    config,
+    SocrataClient,
+    SocrataError,
+    normalize_win4_data,
+    filter_by_date_range,
+    filter_by_draw_type,
+    get_date_range,
+    add_derived_columns,
+    get_pattern_type,
+    get_box_permutation_count,
+    calculate_date_preset,
+    validate_combo,
+    get_digit_frequency,
+    get_digit_frequency_matrix,
+    get_combo_frequency,
+    get_hot_combos,
+    get_cold_combos,
+    get_digit_sum_distribution,
+    get_pattern_distribution,
+    get_repeat_analysis,
+    get_mirror_analysis,
+    check_straight_match,
+    check_box_match,
+    init_watchlist,
+    add_to_watchlist,
+    remove_from_watchlist,
+    clear_watchlist,
+    get_watchlist,
+    get_watchlist_count,
+    bulk_add_to_watchlist,
+    export_watchlist_csv,
+    import_watchlist_csv,
+    get_watchlist_stats,
 )
-from win4lib.analytics import (
-    add_digit_columns,
-    digit_position_frequency,
-    combo_frequency,
-    hot_cold_scores,
-    strategy_backtest_hit_rate,
-    add_pattern_features,
-    pattern_summary,
-    pair_position_matrix,
-    watchlist_stats,
-    add_sorted_signature,
-    box_type_for_number,
-)
+
+# =============================================================================
+# Page Configuration
+# =============================================================================
 
 st.set_page_config(
-    page_title="NYS Win 4 Lottery Analytics",
+    page_title="NYS Win 4 Analytics",
     page_icon="🎰",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded"
 )
 
-st.markdown(
-    """
+# =============================================================================
+# Custom CSS for Mobile & Styling
+# =============================================================================
+
+st.markdown("""
 <style>
-.block-container { padding-top: 1rem; padding-bottom: 2rem; }
-@media (max-width: 768px) {
-  .block-container { padding-left: 0.8rem; padding-right: 0.8rem; }
-  div[data-baseweb="input"] { width: 100% !important; }
+/* Responsive tables */
+.stDataFrame {
+    max-width: 100%;
+    overflow-x: auto;
 }
-h1, h2, h3 { letter-spacing: -0.02em; }
+
+/* Larger touch targets */
+.stButton > button {
+    min-height: 44px;
+}
+
+/* Better input sizing on mobile */
+@media (max-width: 768px) {
+    .stTextInput input {
+        font-size: 16px !important;
+    }
+    
+    .stSelectbox select {
+        font-size: 16px !important;
+    }
+}
+
+/* Stat card styling */
+.stat-box {
+    background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
+    padding: 1rem;
+    border-radius: 10px;
+    text-align: center;
+    margin-bottom: 0.5rem;
+}
+
+.stat-box h3 {
+    margin: 0;
+    color: #fff;
+    font-size: 1.5rem;
+}
+
+.stat-box p {
+    margin: 0;
+    color: #a0c4e8;
+    font-size: 0.85rem;
+}
+
+/* Combo display */
+.combo-display {
+    font-family: 'Courier New', monospace;
+    font-size: 2rem;
+    font-weight: bold;
+    letter-spacing: 0.5rem;
+    color: #4CAF50;
+}
+
+/* Hot/Cold indicators */
+.hot-indicator { color: #ff4444; }
+.cold-indicator { color: #4444ff; }
+
+/* Hide Streamlit branding */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-DATASET_DOMAIN = "data.ny.gov"
-DATASET_ID = "hsys-3def"
-DRAW_TYPES = ["Midday", "Evening"]
+# =============================================================================
+# Data Loading with Progress
+# =============================================================================
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_data() -> pd.DataFrame:
+    """Load and normalize WIN4 data from Socrata."""
+    # Get app token from secrets if available
+    app_token = st.secrets.get("SOCRATA_APP_TOKEN", None)
+    
+    client = SocrataClient(app_token=app_token)
+    raw_data = client.fetch_all()
+    df = normalize_win4_data(raw_data)
+    df = add_derived_columns(df)
+    
+    return df
 
 
-@dataclass(frozen=True)
-class Filters:
-    draw_types: List[str]
-    start_date: date
-    end_date: date
+def load_data_with_progress() -> pd.DataFrame:
+    """Load data with visual progress indicator."""
+    # Check if data is already cached
+    if "data_loaded" in st.session_state and st.session_state.data_loaded:
+        return load_data()
+    
+    progress_container = st.empty()
+    
+    with progress_container.container():
+        st.info("📊 Loading lottery data from NY Open Data...")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        app_token = st.secrets.get("SOCRATA_APP_TOKEN", None)
+        client = SocrataClient(app_token=app_token)
+        
+        def update_progress(current: int, total: int):
+            progress = min(current / total, 1.0) if total > 0 else 0
+            progress_bar.progress(progress)
+            status_text.text(f"Loading: {current:,} / ~{total:,} records")
+        
+        try:
+            raw_data = client.fetch_all(progress_callback=update_progress)
+            df = normalize_win4_data(raw_data)
+            df = add_derived_columns(df)
+            
+            st.session_state.data_loaded = True
+            
+        except SocrataError as e:
+            st.error(f"Failed to load data: {e}")
+            return pd.DataFrame()
+    
+    progress_container.empty()
+    
+    # Also populate the cache
+    return load_data()
 
 
-def _default_date_range() -> Tuple[date, date]:
-    today = date.today()
-    return (today - timedelta(days=365), today)
+def get_freshness_info() -> dict:
+    """Get dataset freshness information."""
+    try:
+        app_token = st.secrets.get("SOCRATA_APP_TOKEN", None)
+        client = SocrataClient(app_token=app_token)
+        return client.get_freshness()
+    except Exception:
+        return {"data_updated": "Unknown", "rows_updated": "Unknown"}
 
 
-def _sidebar() -> Tuple[Filters, int]:
-    st.sidebar.header("⚙️ Controls")
-    st.sidebar.caption("Optional token: SOCRATA_APP_TOKEN (secrets/env)")
+# =============================================================================
+# Sidebar
+# =============================================================================
 
-    if st.sidebar.button("🔄 Refresh data cache", use_container_width=True):
-        st.cache_data.clear()
-        st.toast("Cache cleared. Re-loading…", icon="✅")
-
-    rolling = st.sidebar.slider(
-        "Hot/Cold rolling window (days)",
+def render_sidebar(df: pd.DataFrame):
+    """Render sidebar with filters and controls."""
+    st.sidebar.title("🎰 Win 4 Analytics")
+    
+    # Data freshness badge
+    with st.sidebar.expander("📡 Data Status", expanded=False):
+        freshness = get_freshness_info()
+        st.caption(f"Last Updated: {freshness['data_updated'][:10] if len(freshness['data_updated']) > 10 else freshness['data_updated']}")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh", use_container_width=True):
+                st.cache_data.clear()
+                st.session_state.data_loaded = False
+                st.rerun()
+        with col2:
+            st.metric("Records", f"{len(df):,}")
+    
+    st.sidebar.divider()
+    
+    # Date Range Section
+    st.sidebar.subheader("📅 Date Range")
+    
+    min_date, max_date = get_date_range(df)
+    
+    # Date preset buttons
+    st.sidebar.caption("Quick Select:")
+    preset_cols = st.sidebar.columns(3)
+    preset_names = list(config.date_presets.keys())
+    
+    # Initialize session state for date preset
+    if "date_preset" not in st.session_state:
+        st.session_state.date_preset = "30 Days"
+    
+    # Render preset buttons
+    for i, preset_name in enumerate(preset_names[:3]):
+        with preset_cols[i % 3]:
+            if st.button(preset_name, key=f"preset_{i}", use_container_width=True,
+                        type="primary" if st.session_state.date_preset == preset_name else "secondary"):
+                st.session_state.date_preset = preset_name
+                st.rerun()
+    
+    preset_cols2 = st.sidebar.columns(2)
+    for i, preset_name in enumerate(preset_names[3:]):
+        with preset_cols2[i]:
+            if st.button(preset_name, key=f"preset_{i+3}", use_container_width=True,
+                        type="primary" if st.session_state.date_preset == preset_name else "secondary"):
+                st.session_state.date_preset = preset_name
+                st.rerun()
+    
+    # Calculate default dates from preset
+    preset_days = config.date_presets.get(st.session_state.date_preset)
+    if preset_days is None:
+        default_start = min_date.date()
+    else:
+        default_start = max(min_date.date(), (max_date - timedelta(days=preset_days)).date())
+    
+    # Manual date pickers
+    st.sidebar.caption("Or select custom range:")
+    start_date = st.sidebar.date_input(
+        "Start",
+        value=default_start,
+        min_value=min_date.date(),
+        max_value=max_date.date()
+    )
+    end_date = st.sidebar.date_input(
+        "End",
+        value=max_date.date(),
+        min_value=min_date.date(),
+        max_value=max_date.date()
+    )
+    
+    st.sidebar.divider()
+    
+    # Draw Type Filter
+    st.sidebar.subheader("🎯 Draw Type")
+    draw_type = st.sidebar.radio(
+        "Select draws",
+        ["Both", "Midday", "Evening"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    
+    st.sidebar.divider()
+    
+    # Analysis Settings
+    st.sidebar.subheader("⚙️ Settings")
+    rolling_window = st.sidebar.slider(
+        "Rolling Window (days)",
         min_value=7,
-        max_value=365,
-        value=60,
-        step=1,
+        max_value=90,
+        value=config.analytics.default_rolling_window,
+        help="Used for hot/cold analysis"
     )
-
-    draw_types = st.sidebar.multiselect("Draw(s)", options=DRAW_TYPES, default=DRAW_TYPES)
-    if not draw_types:
-        draw_types = DRAW_TYPES
-
-    d0, d1 = _default_date_range()
-    start_date, end_date = st.sidebar.date_input("Date range", value=(d0, d1))
-    if isinstance(start_date, (tuple, list)) and len(start_date) == 2:
-        start_date, end_date = start_date
-    if start_date > end_date:
-        start_date, end_date = end_date, start_date
-
-    return Filters(draw_types=draw_types, start_date=start_date, end_date=end_date), rolling
+    
+    return start_date, end_date, draw_type, rolling_window
 
 
-def _apply_filters(df: pd.DataFrame, f: Filters) -> pd.DataFrame:
-    out = df.copy()
-    out = out[out["draw_type"].isin(f.draw_types)]
-    out = out[(out["draw_date"].dt.date >= f.start_date) & (out["draw_date"].dt.date <= f.end_date)]
-    return out
+# =============================================================================
+# Tab: Overview
+# =============================================================================
+
+def render_overview_tab(df: pd.DataFrame):
+    """Render overview tab with summary stats."""
+    st.header("📈 Overview")
+    
+    # Key metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Draws", f"{len(df):,}")
+    with col2:
+        unique_combos = df["win4"].nunique()
+        st.metric("Unique Combos", f"{unique_combos:,}")
+    with col3:
+        min_date, max_date = get_date_range(df)
+        days_span = (max_date - min_date).days
+        st.metric("Date Range", f"{days_span:,} days")
+    with col4:
+        midday_count = len(df[df["draw_type"] == "Midday"])
+        evening_count = len(df[df["draw_type"] == "Evening"])
+        st.metric("Midday / Evening", f"{midday_count:,} / {evening_count:,}")
+    
+    st.divider()
+    
+    # Draw volume over time
+    st.subheader("Draw Volume Trend")
+    
+    # Aggregate by month
+    df_monthly = df.copy()
+    df_monthly["month"] = df_monthly["draw_date"].dt.to_period("M").astype(str)
+    monthly_counts = df_monthly.groupby(["month", "draw_type"]).size().reset_index(name="count")
+    
+    fig = px.bar(
+        monthly_counts,
+        x="month",
+        y="count",
+        color="draw_type",
+        barmode="group",
+        title="Monthly Draw Volume",
+        labels={"month": "Month", "count": "Draws", "draw_type": "Draw Type"}
+    )
+    fig.update_layout(height=400, xaxis_tickangle=-45)
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Recent results
+    st.subheader("🕐 Recent Results")
+    recent = df.head(10)[["draw_date", "draw_type", "win4", "digit_sum", "pattern_type"]]
+    recent.columns = ["Date", "Draw", "Win4", "Sum", "Pattern"]
+    st.dataframe(recent, use_container_width=True, hide_index=True)
 
 
-def _kpi_row(df: pd.DataFrame) -> None:
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Rows (draws)", f"{len(df):,}")
-    with c2:
-        st.metric("Unique combos", f"{df['win4'].nunique():,}" if len(df) else "0")
-    with c3:
-        st.metric("Date min", df["draw_date"].min().date().isoformat() if len(df) else "—")
-    with c4:
-        st.metric("Date max", df["draw_date"].max().date().isoformat() if len(df) else "—")
+# =============================================================================
+# Tab: Frequency Analysis
+# =============================================================================
 
-
-def _heatmap_digit_position(freq: pd.DataFrame, title: str) -> go.Figure:
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=freq.values,
-            x=[str(c) for c in freq.columns],
-            y=[f"Pos {i}" for i in freq.index],
-            hovertemplate="Position=%{y}<br>Digit=%{x}<br>Count=%{z}<extra></extra>",
+def render_frequency_tab(df: pd.DataFrame):
+    """Render frequency analysis tab."""
+    st.header("📊 Frequency Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Digit Frequency by Position")
+        
+        # Build heatmap data
+        freq_matrix = get_digit_frequency_matrix(df)
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=freq_matrix.values,
+            x=freq_matrix.columns,
+            y=freq_matrix.index,
+            colorscale="Blues",
+            text=freq_matrix.values,
+            texttemplate="%{text}",
+            textfont={"size": 11},
+            hovertemplate="Position: %{x}<br>Digit: %{y}<br>Count: %{z}<extra></extra>"
+        ))
+        fig.update_layout(
+            height=400,
+            xaxis_title="Position",
+            yaxis_title="Digit",
+            yaxis=dict(dtick=1)
         )
-    )
-    fig.update_layout(title=title, xaxis_title="Digit", yaxis_title="Position", height=420)
-    return fig
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.subheader("Digit Sum Distribution")
+        
+        sum_dist = get_digit_sum_distribution(df)
+        
+        fig = px.bar(
+            sum_dist,
+            x="digit_sum",
+            y="count",
+            title="Distribution of Digit Sums (0-36)",
+            labels={"digit_sum": "Digit Sum", "count": "Frequency"}
+        )
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.divider()
+    
+    # Top combos
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("🔥 Most Frequent Combos")
+        top_combos = get_combo_frequency(df, top_n=config.analytics.default_top_n)
+        st.dataframe(
+            top_combos.rename(columns={"combo": "Combo", "count": "Count", "pct": "%"}),
+            use_container_width=True,
+            hide_index=True
+        )
+    
+    with col2:
+        st.subheader("❄️ Least Frequent (Appeared)")
+        # Get combos that appeared but are rare
+        all_combos = get_combo_frequency(df)
+        rare = all_combos.tail(20).iloc[::-1]  # Reverse to show rarest first
+        st.dataframe(
+            rare.rename(columns={"combo": "Combo", "count": "Count", "pct": "%"}),
+            use_container_width=True,
+            hide_index=True
+        )
 
 
-def _tidy_pair_matrix(df_pairs: pd.DataFrame) -> pd.DataFrame:
-    """
-    Defensive: ensures we always get a 2-col df: pair,count
-    even if upstream changes.
-    """
-    if df_pairs is None or df_pairs.empty:
-        return pd.DataFrame({"pair": [], "count": []})
+# =============================================================================
+# Tab: Patterns
+# =============================================================================
 
-    tmp = df_pairs.reset_index()
+def render_patterns_tab(df: pd.DataFrame):
+    """Render pattern analysis tab."""
+    st.header("🔍 Pattern Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Pattern Distribution")
+        
+        patterns = get_pattern_distribution(df)
+        
+        fig = px.pie(
+            patterns,
+            values="count",
+            names="description",
+            title="Combo Pattern Types",
+            hole=0.4
+        )
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.dataframe(
+            patterns[["pattern", "description", "count", "pct"]].rename(columns={
+                "pattern": "Pattern",
+                "description": "Type",
+                "count": "Count",
+                "pct": "%"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+    
+    with col2:
+        st.subheader("Position Pair Repeats")
+        
+        repeats = get_repeat_analysis(df)
+        
+        fig = px.bar(
+            repeats,
+            x="position_pair",
+            y="pct",
+            title="Repeat Rate by Position Pair",
+            labels={"position_pair": "Position Pair", "pct": "Repeat %"}
+        )
+        fig.update_layout(height=300)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.subheader("Mirror Patterns")
+        mirrors = get_mirror_analysis(df)
+        
+        mirror_df = pd.DataFrame([
+            {"Pattern": "Mirror Ends (d1=d4)", "Count": mirrors["mirror_ends"]["count"], "%": mirrors["mirror_ends"]["pct"]},
+            {"Pattern": "Mirror Middle (d2=d3)", "Count": mirrors["mirror_middle"]["count"], "%": mirrors["mirror_middle"]["pct"]},
+            {"Pattern": "Palindrome", "Count": mirrors["palindrome"]["count"], "%": mirrors["palindrome"]["pct"]},
+            {"Pattern": "ABBA Pattern", "Count": mirrors["abba"]["count"], "%": mirrors["abba"]["pct"]},
+        ])
+        st.dataframe(mirror_df, use_container_width=True, hide_index=True)
 
-    cols = list(tmp.columns)
-    if len(cols) < 2:
-        return pd.DataFrame({"pair": [], "count": []})
 
-    # Rename first two columns to pair/count and select only those
-    tmp = tmp.rename(columns={cols[0]: "pair", cols[1]: "count"})
-    tmp = tmp[["pair", "count"]]
-    return tmp
+# =============================================================================
+# Tab: Trends (Hot/Cold)
+# =============================================================================
+
+def render_trends_tab(df: pd.DataFrame, rolling_window: int):
+    """Render trends and hot/cold analysis."""
+    st.header("📈 Trends & Hot/Cold Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader(f"🔥 Hot Combos (Last {rolling_window} Days)")
+        hot = get_hot_combos(df, rolling_days=rolling_window)
+        
+        if len(hot) > 0:
+            hot_display = hot.copy()
+            hot_display["last_seen"] = hot_display["last_seen"].dt.strftime("%Y-%m-%d")
+            st.dataframe(
+                hot_display.rename(columns={
+                    "combo": "Combo",
+                    "count": "Count",
+                    "last_seen": "Last Seen"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Quick add to watchlist
+            if st.button("➕ Add Top 5 to Watchlist"):
+                added = bulk_add_to_watchlist(hot["combo"].head(5).tolist())
+                st.success(f"Added {added} combos to watchlist")
+        else:
+            st.info("No data in selected range")
+    
+    with col2:
+        st.subheader(f"❄️ Cold Combos (Historically Active)")
+        cold = get_cold_combos(df, rolling_days=rolling_window)
+        
+        if len(cold) > 0:
+            cold_display = cold.head(20).copy()
+            cold_display["last_seen"] = cold_display["last_seen"].dt.strftime("%Y-%m-%d")
+            st.dataframe(
+                cold_display.rename(columns={
+                    "combo": "Combo",
+                    "recent_count": "Recent",
+                    "historical_count": "Historical",
+                    "last_seen": "Last Seen"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No cold combos found")
+    
+    st.divider()
+    
+    # Hot digits by position
+    st.subheader("🎯 Hot Digits by Position")
+    
+    cutoff = df["draw_date"].max() - timedelta(days=rolling_window)
+    recent = df[df["draw_date"] >= cutoff]
+    
+    cols = st.columns(4)
+    for i, col in enumerate(cols):
+        with col:
+            freq = get_digit_frequency(recent, i + 1)
+            top_digit = freq.idxmax()
+            top_count = freq.max()
+            
+            st.metric(
+                f"Position {i+1}",
+                f"Digit: {top_digit}",
+                f"{top_count} times"
+            )
 
 
-def main() -> None:
-    st.title("🎰 NYS Win 4 Lottery Analytics")
+# =============================================================================
+# Tab: Watchlist
+# =============================================================================
 
-    data_updated, rows_updated, _label = get_freshness_info(DATASET_DOMAIN, DATASET_ID)
-    st.markdown(format_freshness_badge(data_updated, rows_updated), unsafe_allow_html=True)
+def render_watchlist_tab(df: pd.DataFrame):
+    """Render watchlist management tab."""
+    st.header("⭐ Watchlist")
+    
+    # Initialize watchlist
+    init_watchlist()
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("Add to Watchlist")
+        
+        # Single combo input
+        new_combo = st.text_input(
+            "Enter 4-digit combo",
+            max_chars=4,
+            placeholder="e.g., 1234"
+        )
+        
+        add_col1, add_col2 = st.columns(2)
+        with add_col1:
+            if st.button("➕ Add Combo", use_container_width=True):
+                if new_combo:
+                    is_valid, result = validate_combo(new_combo)
+                    if is_valid:
+                        if add_to_watchlist(result):
+                            st.success(f"Added {result}")
+                        else:
+                            st.warning(f"{result} already in watchlist")
+                    else:
+                        st.error(result)
+        
+        with add_col2:
+            if st.button("🗑️ Clear All", use_container_width=True):
+                clear_watchlist()
+                st.success("Watchlist cleared")
+                st.rerun()
+    
+    with col2:
+        st.subheader("Import/Export")
+        
+        # Export
+        csv_data = export_watchlist_csv()
+        st.download_button(
+            "📥 Export CSV",
+            csv_data,
+            file_name="win4_watchlist.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        # Import
+        uploaded = st.file_uploader("📤 Import CSV", type=["csv"])
+        if uploaded:
+            content = uploaded.read().decode("utf-8")
+            results = import_watchlist_csv(content)
+            st.success(f"Added: {results['added']}, Skipped: {results['skipped']}, Invalid: {results['invalid']}")
+            st.rerun()
+    
+    st.divider()
+    
+    # Display watchlist
+    watchlist = get_watchlist()
+    
+    if watchlist:
+        st.subheader(f"📋 Your Watchlist ({len(watchlist)} combos)")
+        
+        # Get stats
+        stats = get_watchlist_stats(df, watchlist)
+        stats_df = pd.DataFrame(stats)
+        
+        # Format for display
+        display_df = stats_df.copy()
+        display_df["last_seen"] = display_df["last_seen"].apply(
+            lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "Never"
+        )
+        display_df["days_ago"] = display_df["days_ago"].apply(
+            lambda x: f"{int(x)} days" if pd.notna(x) else "-"
+        )
+        
+        st.dataframe(
+            display_df[["combo", "straight_hits", "box_hits", "last_seen", "days_ago", "pattern", "box_ways"]].rename(columns={
+                "combo": "Combo",
+                "straight_hits": "Straight",
+                "box_hits": "Box",
+                "last_seen": "Last Seen",
+                "days_ago": "Days Ago",
+                "pattern": "Pattern",
+                "box_ways": "Box Ways"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Remove individual combos
+        st.subheader("Remove Combos")
+        combo_to_remove = st.selectbox("Select combo to remove", watchlist)
+        if st.button("🗑️ Remove Selected"):
+            remove_from_watchlist(combo_to_remove)
+            st.success(f"Removed {combo_to_remove}")
+            st.rerun()
+    else:
+        st.info("Your watchlist is empty. Add combos above!")
 
-    filters, rolling_days = _sidebar()
 
-    with st.spinner("Loading NYS Win 4 data…"):
-        df_long = load_win4_long(domain=DATASET_DOMAIN, dataset_id=DATASET_ID)
+# =============================================================================
+# Tab: Checker
+# =============================================================================
 
-    st.caption(get_last_updated_hint(df_long))
+def render_checker_tab(df: pd.DataFrame):
+    """Render mock drawing checker tab."""
+    st.header("🔎 Drawing Checker")
+    
+    st.markdown("Check any 4-digit combo against historical results.")
+    
+    # Input
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 2])
+    
+    with col1:
+        d1 = st.selectbox("D1", config.ui.digits, key="check_d1")
+    with col2:
+        d2 = st.selectbox("D2", config.ui.digits, key="check_d2")
+    with col3:
+        d3 = st.selectbox("D3", config.ui.digits, key="check_d3")
+    with col4:
+        d4 = st.selectbox("D4", config.ui.digits, key="check_d4")
+    
+    combo = f"{d1}{d2}{d3}{d4}"
+    
+    with col5:
+        st.markdown(f"### Combo: `{combo}`")
+        pattern = get_pattern_type(combo)
+        box_ways = get_box_permutation_count(combo)
+        st.caption(f"{config.pattern_names[pattern]} ({box_ways}-way box)")
+    
+    st.divider()
+    
+    # Results
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("✅ Straight Matches")
+        straight = check_straight_match(combo, df)
+        st.metric("Total Straight Hits", len(straight))
+        
+        if len(straight) > 0:
+            display = straight[["draw_date", "draw_type"]].head(20).copy()
+            display["draw_date"] = display["draw_date"].dt.strftime("%Y-%m-%d")
+            display.columns = ["Date", "Draw"]
+            st.dataframe(display, use_container_width=True, hide_index=True)
+            
+            # Breakdown
+            midday = len(straight[straight["draw_type"] == "Midday"])
+            evening = len(straight[straight["draw_type"] == "Evening"])
+            st.caption(f"Midday: {midday} | Evening: {evening}")
+        else:
+            st.info("No straight matches found")
+    
+    with col2:
+        st.subheader("📦 Box Matches")
+        box = check_box_match(combo, df)
+        st.metric("Total Box Hits", len(box))
+        
+        if len(box) > 0:
+            display = box[["draw_date", "draw_type", "win4"]].head(20).copy()
+            display["draw_date"] = display["draw_date"].dt.strftime("%Y-%m-%d")
+            display.columns = ["Date", "Draw", "Result"]
+            st.dataframe(display, use_container_width=True, hide_index=True)
+            
+            # Breakdown
+            midday = len(box[box["draw_type"] == "Midday"])
+            evening = len(box[box["draw_type"] == "Evening"])
+            st.caption(f"Midday: {midday} | Evening: {evening}")
+        else:
+            st.info("No box matches found")
+    
+    # Add to watchlist button
+    if st.button(f"⭐ Add {combo} to Watchlist"):
+        if add_to_watchlist(combo):
+            st.success(f"Added {combo} to watchlist!")
+        else:
+            st.info(f"{combo} is already in your watchlist")
 
-    df = _apply_filters(df_long, filters)
-    df = add_digit_columns(df)
-    df = add_pattern_features(df)
-    df = add_sorted_signature(df)
 
-    if "watchlist" not in st.session_state:
-        st.session_state["watchlist"] = []
+# =============================================================================
+# Tab: Data Export
+# =============================================================================
 
-    _kpi_row(df)
+def render_data_tab(df: pd.DataFrame):
+    """Render data viewing and export tab."""
+    st.header("📁 Data Export")
+    
+    # Summary
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Records", f"{len(df):,}")
+    with col2:
+        min_date, max_date = get_date_range(df)
+        st.metric("Date Range", f"{min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
+    with col3:
+        st.metric("Columns", len(df.columns))
+    
+    st.divider()
+    
+    # Data preview
+    st.subheader("Data Preview")
+    display_cols = ["draw_date", "draw_type", "win4", "digit_sum", "pattern_type"]
+    st.dataframe(df[display_cols].head(100), use_container_width=True, hide_index=True)
+    
+    # Export
+    st.subheader("Export Options")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # CSV export
+        csv = df[display_cols].to_csv(index=False)
+        st.download_button(
+            "📥 Download CSV",
+            csv,
+            file_name=f"win4_data_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    with col2:
+        # JSON export
+        json_data = df[display_cols].to_json(orient="records", date_format="iso")
+        st.download_button(
+            "📥 Download JSON",
+            json_data,
+            file_name=f"win4_data_{datetime.now().strftime('%Y%m%d')}.json",
+            mime="application/json",
+            use_container_width=True
+        )
 
-    tabs = st.tabs(["📌 Overview", "🔥 Frequency", "🧩 Patterns", "📈 Trends", "⭐ Watchlist", "✅ Mock Checker", "🧾 Data"])
 
+# =============================================================================
+# Main App
+# =============================================================================
+
+def main():
+    """Main application entry point."""
+    # Load data with progress indicator
+    df_full = load_data_with_progress()
+    
+    if len(df_full) == 0:
+        st.error("Failed to load data. Please check your connection and try again.")
+        st.stop()
+    
+    # Render sidebar and get filter values
+    start_date, end_date, draw_type, rolling_window = render_sidebar(df_full)
+    
+    # Apply filters
+    df = filter_by_date_range(df_full, start_date, end_date)
+    df = filter_by_draw_type(df, draw_type)
+    
+    # Show filtered count
+    st.sidebar.divider()
+    st.sidebar.metric("Filtered Draws", f"{len(df):,}")
+    
+    # Main content tabs
+    tabs = st.tabs([
+        "📈 Overview",
+        "📊 Frequency",
+        "🔍 Patterns",
+        "📈 Trends",
+        "⭐ Watchlist",
+        "🔎 Checker",
+        "📁 Data"
+    ])
+    
     with tabs[0]:
-        st.subheader("Overview")
-        if df.empty:
-            st.info("No data for the selected filters.")
-        else:
-            daily = df.groupby(df["draw_date"].dt.date).size().reset_index(name="draws")
-            daily.columns = ["date", "draws"]
-            fig = px.line(daily, x="date", y="draws", title="Draw count per day (filtered)")
-            fig.update_layout(height=380)
-            st.plotly_chart(fig, use_container_width=True)
-
+        render_overview_tab(df)
+    
     with tabs[1]:
-        st.subheader("Frequency Analysis")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            freq_pos = digit_position_frequency(df)
-            st.plotly_chart(_heatmap_digit_position(freq_pos, "Digit frequency by position (1–4)"), use_container_width=True)
-
-        with c2:
-            if df.empty:
-                st.info("No data to plot.")
-            else:
-                sum_counts = df["digit_sum"].value_counts().sort_index().reset_index()
-                sum_counts.columns = ["digit_sum", "count"]
-                fig = px.bar(sum_counts, x="digit_sum", y="count", title="Distribution: digit sum (0–36)")
-                fig.update_layout(height=420)
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.divider()
-        st.markdown("#### Hot list (exportable)")
-        hot_n = st.slider("Hot list size", 10, 500, 50, step=10)
-        hot_df = hot_cold_scores(df, window_days=rolling_days).head(hot_n)
-        st.dataframe(hot_df, use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "⬇️ Download Hot List CSV",
-            data=hot_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"nys_win4_hot_list_{rolling_days}d.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        st.divider()
-        st.markdown("#### Top / Bottom combos")
-        top_n = st.slider("Show top/bottom N combos", 10, 200, 50, step=10)
-        freq_combo = combo_frequency(df)
-
-        colT, colBtm = st.columns(2)
-        with colT:
-            st.markdown("**Most frequent**")
-            st.dataframe(freq_combo.head(top_n), use_container_width=True, hide_index=True)
-        with colBtm:
-            st.markdown("**Least frequent**")
-            st.dataframe(freq_combo.tail(top_n), use_container_width=True, hide_index=True)
-
-    # ✅ CRASH FIX IS HERE
+        render_frequency_tab(df)
+    
     with tabs[2]:
-        st.subheader("Pattern Explorer: Pairs / Repeats / Mirrors")
-
-        if df.empty:
-            st.info("No data for selected filters.")
-        else:
-            summ = pattern_summary(df)
-            fig = px.bar(summ, x="pattern_label", y="count", title="Pattern distribution")
-            fig.update_layout(height=420, xaxis_title="Pattern", yaxis_title="Count")
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.divider()
-
-            c1, c2 = st.columns(2)
-            with c1:
-                mirror = pd.DataFrame(
-                    {
-                        "metric": ["Mirror ends (d1=d4)", "Mirror middle (d2=d3)", "Palindrome (ABBA)"],
-                        "count": [
-                            int(df["is_mirror_ends"].sum()),
-                            int(df["is_mirror_middle"].sum()),
-                            int(df["is_palindrome"].sum()),
-                        ],
-                    }
-                )
-                mirror["share"] = mirror["count"] / max(len(df), 1)
-                st.dataframe(mirror, use_container_width=True, hide_index=True)
-
-            with c2:
-                # pair_position_matrix now returns tidy shape,
-                # but we still defend in case of future edits.
-                pm_raw = pair_position_matrix(df)
-                pm = _tidy_pair_matrix(pm_raw)
-
-                fig2 = px.bar(pm, x="pair", y="count", title="Where repeats occur (position pairs)")
-                fig2.update_layout(height=420, xaxis_title="Position Pair", yaxis_title="Count")
-                st.plotly_chart(fig2, use_container_width=True)
-
-            st.divider()
-            st.markdown("#### Filter by pattern and inspect combos")
-            pat = st.selectbox("Pattern", options=sorted(df["pattern_label"].unique().tolist()))
-            dpat = df[df["pattern_label"] == pat]
-            pat_freq = dpat["win4"].value_counts().head(100).reset_index()
-            pat_freq.columns = ["win4", "count"]
-            st.dataframe(pat_freq, use_container_width=True, hide_index=True)
-
+        render_patterns_tab(df)
+    
     with tabs[3]:
-        st.subheader("Trends: Hot vs Cold + Performance")
-
-        if df.empty:
-            st.info("No data for selected filters.")
-        else:
-            scores = hot_cold_scores(df, window_days=rolling_days)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown(f"**Hot (last {rolling_days} days)**")
-                st.dataframe(scores.sort_values("score", ascending=False).head(30), use_container_width=True, hide_index=True)
-            with c2:
-                st.markdown(f"**Cold (last {rolling_days} days)**")
-                st.dataframe(scores.sort_values("score", ascending=True).head(30), use_container_width=True, hide_index=True)
-
-            st.divider()
-
-            perf = strategy_backtest_hit_rate(df, window_days=rolling_days)
-            fig = px.line(perf, x="draw_date", y="hit_rate", title=f"Strategy hit rate over time (window={rolling_days} days)")
-            fig.update_layout(height=420, yaxis_tickformat=".2%")
-            st.plotly_chart(fig, use_container_width=True)
-
+        render_trends_tab(df, rolling_window)
+    
     with tabs[4]:
-        st.subheader("⭐ Watchlist (favorite combos)")
-
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            add_one = st.text_input("Add combo (0000–9999)", value="", max_chars=4, placeholder="e.g., 0427")
-        with c2:
-            if st.button("➕ Add", use_container_width=True):
-                s = add_one.strip()
-                if s.isdigit() and len(s) == 4:
-                    if s not in st.session_state["watchlist"]:
-                        st.session_state["watchlist"].append(s)
-                        st.toast(f"Added {s}", icon="⭐")
-                else:
-                    st.toast("Enter exactly 4 digits.", icon="⚠️")
-        with c3:
-            st.write("")
-
-        hot_pick = st.multiselect(
-            "Quick-add from current Hot List",
-            options=hot_cold_scores(df, window_days=rolling_days)["win4"].head(200).tolist() if not df.empty else [],
-            default=[],
-        )
-        if st.button("⭐ Add selected to watchlist", use_container_width=True) and hot_pick:
-            for w in hot_pick:
-                if w not in st.session_state["watchlist"]:
-                    st.session_state["watchlist"].append(w)
-
-        if st.session_state["watchlist"]:
-            remove_pick = st.multiselect("Remove from watchlist", options=sorted(st.session_state["watchlist"]))
-            if st.button("🗑️ Remove selected", use_container_width=True) and remove_pick:
-                st.session_state["watchlist"] = [w for w in st.session_state["watchlist"] if w not in set(remove_pick)]
-
-        st.divider()
-        wl = sorted(st.session_state["watchlist"])
-        st.caption(f"Watchlist size: {len(wl)}")
-
-        stats = watchlist_stats(df, wl, window_days=rolling_days)
-        st.dataframe(stats, use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "⬇️ Download Watchlist CSV",
-            data=stats.to_csv(index=False).encode("utf-8"),
-            file_name="nys_win4_watchlist.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        st.markdown("#### Optional: Import watchlist from CSV")
-        up = st.file_uploader("Upload CSV with a 'win4' column", type=["csv"])
-        if up is not None:
-            try:
-                imp = pd.read_csv(up)
-                if "win4" not in imp.columns:
-                    st.error("CSV must include a 'win4' column.")
-                else:
-                    new_vals = (
-                        imp["win4"].astype(str).str.replace(r"\D+", "", regex=True).str.zfill(4)
-                        .loc[lambda s: s.str.fullmatch(r"\d{4}", na=False)]
-                        .unique()
-                        .tolist()
-                    )
-                    for w in new_vals:
-                        if w not in st.session_state["watchlist"]:
-                            st.session_state["watchlist"].append(w)
-                    st.success(f"Imported {len(new_vals)} combos.")
-            except Exception as e:
-                st.error(f"Import failed: {e}")
-
+        render_watchlist_tab(df_full)  # Watchlist uses full data
+    
     with tabs[5]:
-        st.subheader("Mock Drawing Checker (Straight + Box + Box Type)")
-        st.caption("Straight = exact order. Box = same digits any order (repeats count). Box Type = distinct permutations.")
-
-        dcol1, dcol2, dcol3, dcol4 = st.columns(4)
-        with dcol1:
-            d1 = st.number_input("Digit 1", min_value=0, max_value=9, value=0, step=1)
-        with dcol2:
-            d2 = st.number_input("Digit 2", min_value=0, max_value=9, value=0, step=1)
-        with dcol3:
-            d3 = st.number_input("Digit 3", min_value=0, max_value=9, value=0, step=1)
-        with dcol4:
-            d4 = st.number_input("Digit 4", min_value=0, max_value=9, value=0, step=1)
-
-        user_straight = f"{d1}{d2}{d3}{d4}"
-        box_label, box_ways, user_box_sig = box_type_for_number(user_straight)
-
-        scope_col1, scope_col2 = st.columns([1, 2])
-        with scope_col1:
-            draw_scope = st.selectbox("Check which draws?", options=["Both (Midday + Evening)", "Midday only", "Evening only"])
-        with scope_col2:
-            st.markdown(f"**Your Box Type:** {box_label} ({box_ways} ways)  \n**Sorted signature:** `{user_box_sig}`")
-
-        if df.empty:
-            st.info("No data for the selected filters.")
-        else:
-            dff = df.copy()
-            if draw_scope == "Midday only":
-                dff = dff[dff["draw_type"] == "Midday"]
-            elif draw_scope == "Evening only":
-                dff = dff[dff["draw_type"] == "Evening"]
-
-            straight_matches = dff[dff["win4"] == user_straight].sort_values("draw_date", ascending=False)
-            box_matches_all = dff[dff["sig_sorted"] == user_box_sig].sort_values("draw_date", ascending=False)
-            box_only_matches = box_matches_all[box_matches_all["win4"] != user_straight]
-
-            s_count = len(straight_matches)
-            b_count = len(box_only_matches)
-            total_box_including_straight = len(box_matches_all)
-
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Your number", user_straight)
-            with k2:
-                st.metric("Box Type", box_label)
-            with k3:
-                st.metric("Straight wins", f"{s_count:,}")
-            with k4:
-                st.metric("Box wins (non-straight)", f"{b_count:,}")
-
-            st.caption(f"Total box matches (including straight): {total_box_including_straight:,}")
-
-            if s_count == 0 and total_box_including_straight == 0:
-                st.warning("No straight or box matches found in the current filtered dataset.")
-            else:
-                if s_count > 0:
-                    st.markdown("### ✅ Straight Matches (Exact Order)")
-                    show = straight_matches[["draw_date", "draw_type", "win4", "digit_sum"]].copy()
-                    show["match_type"] = "Straight"
-                    show["user_box_type"] = box_label
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-
-                if total_box_including_straight > 0:
-                    st.markdown("### 🎯 Box Matches (Any Order)")
-                    showb = box_matches_all[["draw_date", "draw_type", "win4", "digit_sum"]].copy()
-                    showb["match_type"] = showb["win4"].apply(lambda x: "Straight (also)" if x == user_straight else "Box")
-                    showb["user_box_type"] = box_label
-                    st.dataframe(showb, use_container_width=True, hide_index=True)
-
-                breakdown = pd.DataFrame({
-                    "draw_type": ["Midday", "Evening"],
-                    "straight": [
-                        int((straight_matches["draw_type"] == "Midday").sum()),
-                        int((straight_matches["draw_type"] == "Evening").sum()),
-                    ],
-                    "box_total_including_straight": [
-                        int((box_matches_all["draw_type"] == "Midday").sum()),
-                        int((box_matches_all["draw_type"] == "Evening").sum()),
-                    ],
-                    "box_only": [
-                        int((box_only_matches["draw_type"] == "Midday").sum()),
-                        int((box_only_matches["draw_type"] == "Evening").sum()),
-                    ],
-                })
-                st.markdown("### Breakdown by draw")
-                st.dataframe(breakdown, use_container_width=True, hide_index=True)
-
+        render_checker_tab(df_full)  # Checker uses full data
+    
     with tabs[6]:
-        st.subheader("Underlying Data")
-        st.caption("Normalized long-format: one row per draw (Midday/Evening).")
-
-        st.dataframe(df.sort_values("draw_date", ascending=False).head(500), use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "⬇️ Download filtered CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="nys_win4_filtered.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+        render_data_tab(df)
+    
+    # Footer
+    st.divider()
+    st.caption("""
+    **Disclaimer:** Lottery drawings are completely random. Past results have no influence on future outcomes. 
+    This app is for entertainment and educational purposes only. Please play responsibly.
+    
+    Data Source: [NY Open Data](https://data.ny.gov/) | Dataset ID: hsys-3def
+    """)
 
 
 if __name__ == "__main__":
