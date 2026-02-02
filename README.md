@@ -12,134 +12,154 @@ A production-ready analytics dashboard for **New York State Win 4** results usin
 - **Socrata Domain**: `data.ny.gov`  
 - **Dataset ID**: `hsys-3def`
 
----
+# NYS WIN4 - Phase 1 Update
 
-## Features
+## Quick Start
 
-### Data + Infrastructure
-- ✅ Socrata API integration with **chunked fetching** (`$limit/$offset`) + retries
-- ✅ Optional **Socrata App Token** support for higher rate limits (`SOCRATA_APP_TOKEN`)
-- ✅ Streamlit caching (`@st.cache_data`) with manual **Refresh cache** button
-- ✅ Mobile-friendly layout + dark theme
-- ✅ Plotly visualizations
-- ✅ Streamlit Cloud + Docker compatible
-- ✅ **Socrata “Freshness Badge”** (checks dataset metadata `dataUpdatedAt/rowsUpdatedAt`)
+Replace your existing files with these updated versions:
 
-### Win 4 Normalization
-- Converts source into **long format**: one row per draw
-  - `Midday` from `midday_win_4`
-  - `Evening` from `evening_win_4`
-- Cleans and **zero-pads** results to `0000–9999`
-- Supports multiple daily drawings (Midday + Evening)
+```
+NYS_WIN4/
+├── Win4Lottery.py          # REPLACE - Main app (completely rewritten)
+├── requirements.txt        # REPLACE - Updated dependencies
+├── Dockerfile              # REPLACE - Updated container config
+├── .streamlit/
+│   └── config.toml         # REPLACE - Theme & server settings
+└── win4lib/
+    ├── __init__.py         # REPLACE - Package exports
+    ├── config.py           # NEW - Centralized configuration
+    ├── socrata_client.py   # REPLACE - Added progress callbacks
+    ├── data.py             # REPLACE - Enhanced data processing
+    ├── analytics.py        # REPLACE - Core analytics functions
+    └── storage.py          # NEW - Watchlist persistence
+```
 
----
+## Installation
 
-## App Sections
+1. **Backup your existing code first!**
 
-### 1) Overview
-- Draw volume trend over time (based on selected filters)
+2. **Copy all files** from this package to your project directory, replacing existing files.
 
-### 2) Frequency Analysis
-- **Digit frequency heatmap** by position (1st–4th digit)
-- Digit-sum distribution (0–36)
-- **Top/Bottom** most frequent combos
-- **Hot List** (rolling window) + **CSV export**
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### 3) Patterns Explorer (Pairs / Repeats / Mirror Digits)
-- Pattern categories:
-  - **All Unique (ABCD)**
-  - **One Pair (AABC)**
-  - **Two Pairs (AABB)**
-  - **Triple (AAAB)**
-  - **Quad (AAAA)**
-- Mirror and symmetry metrics:
-  - `d1 = d4` (mirror ends)
-  - `d2 = d3` (mirror middle)
-  - Palindrome / ABBA (`d1=d4` and `d2=d3`)
-- Repeats-by-position heat map (1-2, 1-3, 1-4, 2-3, 2-4, 3-4)
+4. **Run the app:**
+   ```bash
+   streamlit run Win4Lottery.py
+   ```
 
-### 4) Trends (Hot vs Cold + Performance)
-- **Hot vs Cold scoring** using a rolling window (days configurable)
-- Simple performance metric:
-  - Predicts “next draw” as most frequent combo in the prior window
-  - Plots **hit-rate** trend over time
+## What's New in Phase 1
 
-### 5) Watchlist (Favorite Combos)
-- Add/remove favorite 4-digit combos
-- Quick-add from the current Hot List
-- **CSV export** of watchlist stats
-- Optional **CSV import** (expects a `win4` column)
+### ✅ Configuration System (`win4lib/config.py`)
+- All configurable values centralized in one place
+- Easy to modify default rolling window, chart settings, API parameters
+- Pattern names and payout values defined as constants
 
-### 6) Mock Drawing Checker (Straight + Box + Box Type)
-- User enters four digits (separate inputs)
-- Checks against history for:
-  - ✅ **Straight matches** (exact order)
-  - ✅ **Box matches** (digits any order, repeats handled correctly)
-- Displays match tables and Midday/Evening breakdown
-- Computes **Box Type** (distinct permutation count):
-  - **24-way**: ABCD (all unique)
-  - **12-way**: AABC (one pair)
-  - **6-way** : AABB (two pairs)
-  - **4-way** : AAAB (triple)
-  - **1-way** : AAAA (quad)
+### ✅ Progress Indicators
+- Visual progress bar during initial data load
+- Shows record count as data streams in
+- Better user experience for large datasets
 
-### 7) Data
-- View the normalized dataset
-- Export filtered data as CSV
+### ✅ Date Presets
+- One-click buttons: "7 Days", "30 Days", "90 Days", "1 Year", "All Time"
+- Still supports manual date picker for custom ranges
+- Selected preset is highlighted
 
----
+### ✅ Improved Watchlist
+- Persists across browser sessions (file-based storage)
+- CSV import/export functionality
+- Statistics for each watchlist combo (straight/box hits, last seen, etc.)
+- Quick-add from Hot List
 
-## Quickstart (Local)
+### ✅ Enhanced Data Loading
+- Chunked fetching with retry logic
+- Metadata freshness badge
+- Manual refresh button to clear cache
+
+### ✅ Mobile-Friendly CSS
+- Larger touch targets
+- Responsive tables
+- Better font sizing on mobile devices
+
+### ✅ Code Organization
+- Clean separation of concerns (config, data, analytics, storage)
+- Type hints throughout
+- Comprehensive docstrings
+- Modular tab rendering functions
+
+## Configuration
+
+### Socrata App Token (Optional but Recommended)
+
+For higher API rate limits, add your token to Streamlit secrets:
+
+**For Streamlit Cloud:** Add to your app's secrets in the dashboard:
+```toml
+SOCRATA_APP_TOKEN = "your_token_here"
+```
+
+**For local development:** Create `.streamlit/secrets.toml`:
+```toml
+SOCRATA_APP_TOKEN = "your_token_here"
+```
+
+### Customizing Settings
+
+Edit `win4lib/config.py` to change defaults:
+
+```python
+@dataclass
+class AnalyticsConfig:
+    default_rolling_window: int = 30  # Change default window size
+    hot_threshold_percentile: float = 75.0
+    cold_threshold_percentile: float = 25.0
+    min_draws_for_analysis: int = 10
+    default_top_n: int = 20  # Change number of top combos shown
+```
+
+## Docker
+
+Build and run with Docker:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run Win4Lottery.py
-```
-Socrata App Token (Optional)
-```Streamlit Cloud
-Add to Secrets:
-SOCRATA_APP_TOKEN="YOUR_TOKEN"
+# Build
+docker build -t nys-win4 .
+
+# Run
+docker run -p 8501:8501 nys-win4
+
+# Run with Socrata token
+docker run -p 8501:8501 -e SOCRATA_APP_TOKEN="your_token" nys-win4
 ```
 
-Local / Docker
-```
-export SOCRATA_APP_TOKEN="YOUR_TOKEN"
-```
+## File Descriptions
 
+| File | Purpose |
+|------|---------|
+| `Win4Lottery.py` | Main Streamlit application with all UI tabs |
+| `win4lib/config.py` | Centralized configuration dataclasses |
+| `win4lib/socrata_client.py` | Socrata API client with progress callbacks |
+| `win4lib/data.py` | Data normalization and preprocessing |
+| `win4lib/analytics.py` | Frequency, pattern, and trend analysis |
+| `win4lib/storage.py` | Watchlist persistence and CSV import/export |
+| `win4lib/__init__.py` | Package exports for clean imports |
 
-Docker
-```docker build -t nys-win4 .
-docker run -p 8501:8501 -e SOCRATA_APP_TOKEN="$SOCRATA_APP_TOKEN" nys-win4
+## Next Steps (Phase 2+)
 
-Open:
-http://localhost:8501
+After implementing Phase 1, you can move on to:
 
-```
-Repo Structure
-```
-.
-├── Win4Lottery.py
-├── requirements.txt
-├── Dockerfile
-├── README.md
-├── .streamlit/
-│   └── config.toml
-└── win4lib/
-    ├── __init__.py
-    ├── socrata_client.py
-    ├── data.py
-    └── analytics.py
+- **Phase 2:** Gap analysis, time-based patterns, statistical significance
+- **Phase 3:** Smart number picker, historical what-if calculator
+- **Phase 4:** Help docs, additional mobile polish, unit tests
 
-```
+See the full implementation plan for details on upcoming phases.
 
-Notes / Performance Tips
-```
-The app caches dataset loads for faster exploration.
-If you expand the date range to “all time,” tables may become large; filtering by date/draw type improves responsiveness.
-If you hit rate limits, use a Socrata App Token.
-```
+---
+
+Questions? Issues? The code is modular - feel free to modify individual modules without affecting others.
+
 
 Disclaimer
 ```
