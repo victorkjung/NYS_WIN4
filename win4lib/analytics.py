@@ -1,301 +1,406 @@
-from __future__ import annotations
-
-from collections import Counter
-from math import factorial
-from typing import Tuple
-
-import numpy as np
+"""
+Analytics functions for WIN4 data analysis.
+Includes frequency analysis, hot/cold tracking, and pattern detection.
+"""
 import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+from collections import Counter
+from datetime import datetime, timedelta
+
+from .config import config
 
 
-def add_digit_columns(df: pd.DataFrame) -> pd.DataFrame:
+def get_digit_frequency(df: pd.DataFrame, position: int) -> pd.Series:
     """
-    Adds: d1..d4 ints, digit_sum int
+    Get frequency distribution of digits at a specific position.
+
+    Args:
+        df: DataFrame with win4 column
+        position: Position (1-4)
+
+    Returns:
+        Series with digit counts, indexed 0-9
     """
-    if df.empty:
-        return df.assign(
-            d1=pd.Series(dtype="int"), d2=pd.Series(dtype="int"),
-            d3=pd.Series(dtype="int"), d4=pd.Series(dtype="int"),
-            digit_sum=pd.Series(dtype="int"),
-        )
-
-    s = df["win4"].astype("string")
-    digits = s.str.extract(r"(\d)(\d)(\d)(\d)")
-    digits.columns = ["d1", "d2", "d3", "d4"]
-    for c in ["d1", "d2", "d3", "d4"]:
-        digits[c] = digits[c].astype(int)
-
-    out = df.copy()
-    out[["d1", "d2", "d3", "d4"]] = digits[["d1", "d2", "d3", "d4"]]
-    out["digit_sum"] = out[["d1", "d2", "d3", "d4"]].sum(axis=1).astype(int)
-    return out
+    digits = df["win4"].str[position - 1]
+    freq = digits.value_counts()
+    # Ensure all digits 0-9 are present
+    freq = freq.reindex(config.ui.digits, fill_value=0)
+    return freq.sort_index()
 
 
-def digit_position_frequency(df: pd.DataFrame) -> pd.DataFrame:
+def get_digit_frequency_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Returns index=position(1..4), columns=digit(0..9), values=count
+    Get frequency matrix of all digits at all positions.
+
+    Returns:
+        DataFrame with positions as columns, digits as rows
     """
-    if df.empty:
-        return pd.DataFrame(index=[1, 2, 3, 4], columns=list(range(10))).fillna(0).astype(int)
+    matrix = {}
+    for pos in range(1, 5):
+        matrix[f"Pos {pos}"] = get_digit_frequency(df, pos)
 
-    freq = {}
-    for i, col in enumerate(["d1", "d2", "d3", "d4"], start=1):
-        counts = df[col].value_counts().reindex(range(10), fill_value=0).sort_index()
-        freq[i] = counts.values
-
-    out = pd.DataFrame.from_dict(freq, orient="index", columns=list(range(10)))
-    out.index.name = "position"
-    return out
+    return pd.DataFrame(matrix)
 
 
-def combo_frequency(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["win4", "count"])
-    vc = df["win4"].value_counts().reset_index()
-    vc.columns = ["win4", "count"]
-    return vc
-
-
-def hot_cold_scores(df: pd.DataFrame, window_days: int = 60) -> pd.DataFrame:
+def get_combo_frequency(
+    df: pd.DataFrame,
+    top_n: Optional[int] = None
+) -> pd.DataFrame:
     """
-    Score = count_recent - expected_recent (based on prior rate)
-    If no prior exists, score = count_recent
+    Get frequency of each combo.
+
+    Args:
+        df: DataFrame with win4 column
+        top_n: Limit to top N combos (None = all)
+
+    Returns:
+        DataFrame with combo, count, and percentage
     """
-    if df.empty:
-        return pd.DataFrame(columns=["win4", "count_recent", "count_prior", "score"])
+    freq = df["win4"].value_counts()
 
-    dmax = df["draw_date"].max()
-    cutoff = dmax - pd.Timedelta(days=window_days)
+    if top_n:
+        freq = freq.head(top_n)
 
-    recent = df[df["draw_date"] > cutoff]
-    prior = df[df["draw_date"] <= cutoff]
+    result = pd.DataFrame({
+        "combo": freq.index,
+        "count": freq.values,
+        "pct": (freq.values / len(df) * 100).round(3)
+    })
 
-    recent_counts = recent["win4"].value_counts()
-    prior_counts = prior["win4"].value_counts()
-
-    all_keys = recent_counts.index.union(prior_counts.index)
-
-    out = pd.DataFrame({"win4": all_keys})
-    out["count_recent"] = out["win4"].map(recent_counts).fillna(0).astype(int)
-    out["count_prior"] = out["win4"].map(prior_counts).fillna(0).astype(int)
-
-    if len(prior) > 0:
-        prior_rate = out["count_prior"] / max(len(prior), 1)
-        expected_recent = prior_rate * max(len(recent), 1)
-        out["score"] = (out["count_recent"] - expected_recent).astype(float)
-    else:
-        out["score"] = out["count_recent"].astype(float)
-
-    return out.sort_values("score", ascending=False).reset_index(drop=True)
+    return result
 
 
-def strategy_backtest_hit_rate(df: pd.DataFrame, window_days: int = 60) -> pd.DataFrame:
+def get_hot_combos(
+    df: pd.DataFrame,
+    rolling_days: int = 30,
+    top_n: int = 20
+) -> pd.DataFrame:
     """
-    Predict the next draw using the most frequent combo in the prior rolling window.
-    Then compute hit and expanding mean hit rate.
+    Get hot (frequently appearing) combos in recent window.
+
+    Args:
+        df: DataFrame with draw_date and win4 columns
+        rolling_days: Number of days to look back
+        top_n: Number of combos to return
+
+    Returns:
+        DataFrame with combo, count, and last_seen date
     """
-    if df.empty:
-        return pd.DataFrame(columns=["draw_date", "hit", "hit_rate"])
+    cutoff = df["draw_date"].max() - timedelta(days=rolling_days)
+    recent = df[df["draw_date"] >= cutoff]
 
-    d = df.sort_values("draw_date").copy()
-    hits = []
+    freq = recent["win4"].value_counts().head(top_n)
 
-    for i in range(len(d)):
-        t = d.iloc[i]["draw_date"]
-        start = t - pd.Timedelta(days=window_days)
-        hist = d[(d["draw_date"] < t) & (d["draw_date"] >= start)]
-        if hist.empty:
-            hits.append(np.nan)
-            continue
-        pred = hist["win4"].value_counts().idxmax()
-        hits.append(1.0 if pred == d.iloc[i]["win4"] else 0.0)
+    # Get last seen date for each
+    last_seen = recent.groupby("win4")["draw_date"].max()
 
-    d["hit"] = hits
-    d["hit_rate"] = d["hit"].expanding(min_periods=10).mean()
-    return d[["draw_date", "hit", "hit_rate"]].dropna(subset=["hit_rate"]).reset_index(drop=True)
+    result = pd.DataFrame({
+        "combo": freq.index,
+        "count": freq.values,
+        "last_seen": [last_seen.get(c, None) for c in freq.index]
+    })
+
+    return result
 
 
-# ---------------------------
-# Patterns Explorer
-# ---------------------------
-
-def add_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
+def get_cold_combos(
+    df: pd.DataFrame,
+    rolling_days: int = 30,
+    min_historical_count: int = 2
+) -> pd.DataFrame:
     """
-    Adds pattern flags:
-      - has_pair, has_triple, has_quad, is_two_pairs
-      - is_mirror_ends (d1==d4), is_mirror_middle (d2==d3), is_palindrome (ABBA)
-      - is_all_unique
-      - pattern_label
+    Get cold (infrequently appearing) combos that have appeared before.
+
+    Args:
+        df: DataFrame with draw_date and win4 columns
+        rolling_days: Number of days to look back
+        min_historical_count: Minimum historical appearances to consider
+
+    Returns:
+        DataFrame with combo, recent_count, historical_count, last_seen
     """
-    if df.empty:
-        cols_bool = [
-            "is_all_unique", "has_pair", "has_triple", "has_quad", "is_two_pairs",
-            "is_palindrome", "is_mirror_ends", "is_mirror_middle",
-        ]
-        out = df.copy()
-        for c in cols_bool:
-            out[c] = pd.Series(dtype="bool")
-        out["pattern_label"] = pd.Series(dtype="string")
-        return out
+    cutoff = df["draw_date"].max() - timedelta(days=rolling_days)
+    recent = df[df["draw_date"] >= cutoff]
+    historical = df[df["draw_date"] < cutoff]
 
-    out = df.copy()
+    # Get historical frequency
+    hist_freq = historical["win4"].value_counts()
+    hist_freq = hist_freq[hist_freq >= min_historical_count]
 
-    digits = out[["d1", "d2", "d3", "d4"]].to_numpy()
-    sd = np.sort(digits, axis=1)
+    # Get recent frequency
+    recent_freq = recent["win4"].value_counts()
 
-    eq1 = (sd[:, 0] == sd[:, 1]).astype(int)
-    eq2 = (sd[:, 1] == sd[:, 2]).astype(int)
-    eq3 = (sd[:, 2] == sd[:, 3]).astype(int)
+    # Find combos that appeared historically but rarely/never recently
+    results = []
+    for combo in hist_freq.index:
+        recent_count = recent_freq.get(combo, 0)
+        hist_count = hist_freq[combo]
 
-    out["has_quad"] = (eq1 & eq2 & eq3).astype(bool)
-    out["has_triple"] = (((sd[:, 0] == sd[:, 2]) | (sd[:, 1] == sd[:, 3])) & (~out["has_quad"].to_numpy()))
-    out["has_pair"] = ((eq1 + eq2 + eq3) >= 1)
+        # Calculate "coldness" - high historical but low recent
+        if recent_count <= 1:  # Cold threshold
+            last_seen = df[df["win4"] == combo]["draw_date"].max()
+            results.append({
+                "combo": combo,
+                "recent_count": recent_count,
+                "historical_count": hist_count,
+                "last_seen": last_seen
+            })
 
-    out["is_two_pairs"] = ((sd[:, 0] == sd[:, 1]) & (sd[:, 2] == sd[:, 3]) & (sd[:, 1] != sd[:, 2]))
-    out["is_all_unique"] = ~(out["has_pair"])
+    result = pd.DataFrame(results)
+    if len(result) > 0:
+        result = result.sort_values("historical_count", ascending=False)
 
-    out["is_mirror_ends"] = (out["d1"] == out["d4"])
-    out["is_mirror_middle"] = (out["d2"] == out["d3"])
-    out["is_palindrome"] = out["is_mirror_ends"] & out["is_mirror_middle"]
-
-    def label_row(r) -> str:
-        if bool(r["has_quad"]):
-            return "Quad (AAAA)"
-        if bool(r["has_triple"]):
-            return "Triple (AAAB)"
-        if bool(r["is_two_pairs"]):
-            return "Two Pairs (AABB)"
-        if bool(r["has_pair"]):
-            return "One Pair (AABC)"
-        return "All Unique (ABCD)"
-
-    out["pattern_label"] = out.apply(label_row, axis=1).astype("string")
-    return out
+    return result
 
 
-def pattern_summary(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "pattern_label" not in df.columns:
-        return pd.DataFrame(columns=["pattern_label", "count", "share"])
-
-    vc = df["pattern_label"].value_counts().reset_index()
-    vc.columns = ["pattern_label", "count"]
-    vc["share"] = vc["count"] / vc["count"].sum()
-    return vc
-
-
-def pair_position_matrix(df: pd.DataFrame) -> pd.DataFrame:
+def get_hot_cold_score(
+    df: pd.DataFrame,
+    rolling_days: int = 30
+) -> pd.DataFrame:
     """
-    ✅ FIXED: Always returns a tidy dataframe with:
-      index = pair label (e.g., "1-2")
-      column = "count"
-    This prevents shape surprises and fixes the Streamlit crash.
+    Calculate hot/cold score for each combo.
+
+    Score = (recent_freq - expected_freq) / std_dev
+
+    Positive = hot, Negative = cold
+
+    Args:
+        df: DataFrame with draw_date and win4 columns
+        rolling_days: Rolling window size
+
+    Returns:
+        DataFrame with combo and score
     """
-    idx = ["1-2", "1-3", "1-4", "2-3", "2-4", "3-4"]
-    if df.empty:
-        return pd.DataFrame({"count": [0] * len(idx)}, index=idx)
+    cutoff = df["draw_date"].max() - timedelta(days=rolling_days)
+    recent = df[df["draw_date"] >= cutoff]
 
-    # Ensure digits exist
-    if not all(c in df.columns for c in ["d1", "d2", "d3", "d4"]):
-        return pd.DataFrame({"count": [0] * len(idx)}, index=idx)
+    freq = recent["win4"].value_counts()
 
-    d = df[["d1", "d2", "d3", "d4"]]
+    # Expected frequency (uniform distribution)
+    total = len(recent)
+    expected = total / 10000  # 10000 possible combos
 
-    pairs = {
-        "1-2": int((d["d1"] == d["d2"]).sum()),
-        "1-3": int((d["d1"] == d["d3"]).sum()),
-        "1-4": int((d["d1"] == d["d4"]).sum()),
-        "2-3": int((d["d2"] == d["d3"]).sum()),
-        "2-4": int((d["d2"] == d["d4"]).sum()),
-        "3-4": int((d["d3"] == d["d4"]).sum()),
+    # Standard deviation for binomial
+    std = np.sqrt(expected * (1 - 1/10000))
+
+    # Calculate z-score
+    scores = (freq - expected) / std if std > 0 else freq - expected
+
+    result = pd.DataFrame({
+        "combo": scores.index,
+        "count": freq.values,
+        "score": scores.values.round(2)
+    })
+
+    return result.sort_values("score", ascending=False)
+
+
+def get_digit_sum_distribution(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Get distribution of digit sums.
+
+    Args:
+        df: DataFrame with win4 column
+
+    Returns:
+        DataFrame with sum, count, and percentage
+    """
+    sums = df["win4"].apply(lambda x: sum(int(d) for d in x))
+    freq = sums.value_counts().sort_index()
+
+    # Ensure all possible sums (0-36) are present
+    full_index = range(37)
+    freq = freq.reindex(full_index, fill_value=0)
+
+    result = pd.DataFrame({
+        "digit_sum": freq.index,
+        "count": freq.values,
+        "pct": (freq.values / len(df) * 100).round(2)
+    })
+
+    return result
+
+
+def get_pattern_distribution(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Get distribution of pattern types.
+
+    Args:
+        df: DataFrame with win4 column
+
+    Returns:
+        DataFrame with pattern, count, percentage, and description
+    """
+    from .data import get_pattern_type
+
+    patterns = df["win4"].apply(get_pattern_type)
+    freq = patterns.value_counts()
+
+    result = pd.DataFrame({
+        "pattern": freq.index,
+        "count": freq.values,
+        "pct": (freq.values / len(df) * 100).round(2)
+    })
+
+    # Add descriptions
+    result["description"] = result["pattern"].map(config.pattern_names)
+
+    # Sort by expected probability order
+    pattern_order = ["ABCD", "AABC", "AABB", "AAAB", "AAAA"]
+    result["sort_key"] = result["pattern"].apply(lambda x: pattern_order.index(x))
+    result = result.sort_values("sort_key").drop(columns=["sort_key"])
+
+    return result
+
+
+def get_repeat_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analyze digit repeats by position pairs.
+
+    Position pairs: 1-2, 1-3, 1-4, 2-3, 2-4, 3-4
+
+    Args:
+        df: DataFrame with win4 column
+
+    Returns:
+        DataFrame with position pair, repeat count, and percentage
+    """
+    pairs = [
+        ("1-2", 0, 1),
+        ("1-3", 0, 2),
+        ("1-4", 0, 3),
+        ("2-3", 1, 2),
+        ("2-4", 1, 3),
+        ("3-4", 2, 3),
+    ]
+
+    results = []
+    total = len(df)
+
+    for name, i, j in pairs:
+        matches = df["win4"].apply(lambda x: x[i] == x[j]).sum()
+        results.append({
+            "position_pair": name,
+            "repeat_count": matches,
+            "pct": round(matches / total * 100, 2)
+        })
+
+    return pd.DataFrame(results)
+
+
+def get_mirror_analysis(df: pd.DataFrame) -> Dict[str, any]:
+    """
+    Analyze mirror/symmetry patterns.
+
+    Checks:
+    - Mirror ends (d1 = d4)
+    - Mirror middle (d2 = d3)
+    - Palindrome (d1=d4 AND d2=d3)
+    - ABBA pattern
+
+    Args:
+        df: DataFrame with win4 column
+
+    Returns:
+        Dict with counts and percentages for each pattern
+    """
+    total = len(df)
+
+    mirror_ends = df["win4"].apply(lambda x: x[0] == x[3]).sum()
+    mirror_middle = df["win4"].apply(lambda x: x[1] == x[2]).sum()
+    palindrome = df["win4"].apply(lambda x: x == x[::-1]).sum()
+    abba = df["win4"].apply(lambda x: x[0] == x[3] and x[1] == x[2]).sum()
+
+    return {
+        "mirror_ends": {"count": mirror_ends, "pct": round(mirror_ends / total * 100, 2)},
+        "mirror_middle": {"count": mirror_middle, "pct": round(mirror_middle / total * 100, 2)},
+        "palindrome": {"count": palindrome, "pct": round(palindrome / total * 100, 2)},
+        "abba": {"count": abba, "pct": round(abba / total * 100, 2)}
     }
 
-    return pd.Series(pairs, name="count").reindex(idx).to_frame()
 
-
-# ---------------------------
-# Box matching support
-# ---------------------------
-
-def add_sorted_signature(df: pd.DataFrame) -> pd.DataFrame:
+def check_straight_match(combo: str, df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds `sig_sorted` for Box matching (multiset equality).
-    Uses digit columns if present for speed; otherwise falls back to string sorting.
+    Find all straight (exact) matches for a combo.
+
+    Args:
+        combo: 4-digit combo to check
+        df: DataFrame with draw data
+
+    Returns:
+        DataFrame of matching draws
     """
-    out = df.copy()
-    if df.empty:
-        out["sig_sorted"] = pd.Series(dtype="string")
-        return out
-
-    if all(c in out.columns for c in ["d1", "d2", "d3", "d4"]):
-        digits = out[["d1", "d2", "d3", "d4"]].to_numpy()
-        sd = np.sort(digits, axis=1).astype(int)
-        out["sig_sorted"] = pd.Series(["".join(map(str, row)) for row in sd], index=out.index, dtype="string")
-        return out
-
-    out["sig_sorted"] = out["win4"].astype("string").apply(lambda s: "".join(sorted(s))).astype("string")
-    return out
+    matches = df[df["win4"] == combo].copy()
+    return matches.sort_values("draw_date", ascending=False)
 
 
-def box_type_for_number(win4: str) -> Tuple[str, int, str]:
+def check_box_match(combo: str, df: pd.DataFrame) -> pd.DataFrame:
     """
-    Returns: (box_label, distinct_permutations, sorted_signature)
+    Find all box matches (same digits, any order).
 
-    24-way: ABCD
-    12-way: AABC
-    6-way : AABB
-    4-way : AAAB
-    1-way : AAAA
+    Args:
+        combo: 4-digit combo to check
+        df: DataFrame with draw data
+
+    Returns:
+        DataFrame of matching draws
     """
-    s = str(win4).strip()
-    if not (s.isdigit() and len(s) == 4):
-        s = "".join(ch for ch in s if ch.isdigit()).zfill(4)[:4]
-
-    sig = "".join(sorted(s))
-    counts = Counter(sig)
-
-    denom = 1
-    for c in counts.values():
-        denom *= factorial(c)
-
-    ways = factorial(4) // denom
-
-    if ways == 24:
-        label = "24-way"
-    elif ways == 12:
-        label = "12-way"
-    elif ways == 6:
-        label = "6-way"
-    elif ways == 4:
-        label = "4-way"
-    elif ways == 1:
-        label = "1-way"
-    else:
-        label = f"{ways}-way"
-
-    return label, int(ways), sig
+    sorted_combo = "".join(sorted(combo))
+    matches = df[df["win4"].apply(lambda x: "".join(sorted(x))) == sorted_combo].copy()
+    return matches.sort_values("draw_date", ascending=False)
 
 
-# ---------------------------
-# Watchlist helpers
-# ---------------------------
+def calculate_performance(
+    df: pd.DataFrame,
+    rolling_days: int = 30,
+    prediction_method: str = "most_frequent"
+) -> pd.DataFrame:
+    """
+    Calculate prediction performance over time.
 
-def watchlist_stats(df: pd.DataFrame, watchlist: list[str], window_days: int = 60) -> pd.DataFrame:
-    if df.empty or not watchlist:
-        return pd.DataFrame(columns=["win4", "overall_count", "recent_count", "recent_share"])
+    For each day, predicts the next draw based on the rolling window,
+    then checks if prediction was correct.
 
-    dmax = df["draw_date"].max()
-    cutoff = dmax - pd.Timedelta(days=window_days)
-    recent = df[df["draw_date"] > cutoff]
+    Args:
+        df: DataFrame with draw data
+        rolling_days: Size of lookback window
+        prediction_method: "most_frequent" or "hot_digit"
 
-    overall = df["win4"].value_counts()
-    recent_counts = recent["win4"].value_counts()
+    Returns:
+        DataFrame with date, prediction, actual, and hit columns
+    """
+    df_sorted = df.sort_values("draw_date").reset_index(drop=True)
+    results = []
 
-    rows = []
-    for w in watchlist:
-        oc = int(overall.get(w, 0))
-        rc = int(recent_counts.get(w, 0))
-        share = (rc / max(len(recent), 1)) if len(recent) else 0.0
-        rows.append((w, oc, rc, share))
+    for i in range(rolling_days, len(df_sorted)):
+        # Get lookback window
+        window = df_sorted.iloc[i - rolling_days:i]
 
-    out = pd.DataFrame(rows, columns=["win4", "overall_count", "recent_count", "recent_share"])
-    return out.sort_values(["recent_count", "overall_count"], ascending=False).reset_index(drop=True)
+        # Make prediction
+        if prediction_method == "most_frequent":
+            prediction = window["win4"].mode().iloc[0] if len(window) > 0 else "0000"
+        else:
+            # Hot digit method: most frequent digit at each position
+            prediction = ""
+            for pos in range(4):
+                digit = window["win4"].str[pos].mode().iloc[0]
+                prediction += digit
+
+        # Check actual
+        actual = df_sorted.iloc[i]["win4"]
+        draw_date = df_sorted.iloc[i]["draw_date"]
+
+        # Check hits
+        straight_hit = prediction == actual
+        box_hit = "".join(sorted(prediction)) == "".join(sorted(actual))
+
+        results.append({
+            "date": draw_date,
+            "prediction": prediction,
+            "actual": actual,
+            "straight_hit": straight_hit,
+            "box_hit": box_hit
+        })
+
+    return pd.DataFrame(results)
